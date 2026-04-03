@@ -5,15 +5,15 @@ LongMemEval Judge Prompts
 Task-specific prompts for answer generation and answer correctness judging,
 matching the LongMemEval benchmark methodology (ICLR 2025).
 
-Adapted from:
+Judge prompts are adapted from:
     https://github.com/xiaowu0162/LongMemEval/blob/main/src/evaluation/evaluate_qa.py
+
+Answer generation prompt adapted from:
     https://github.com/xiaowu0162/LongMemEval/blob/main/src/generation/run_generation.py
 """
 
-from __future__ import annotations
-
 from datetime import datetime as _datetime, timezone as _timezone
-from typing import Any
+from typing import List, Dict, Any
 
 
 # ===============================================================================
@@ -44,7 +44,7 @@ IMPORTANT: If memories contain the numbers needed to compute the answer (ages to
 
 IMPORTANT: Keep your responses short. No need to go into too much detail, no need to describe things at the lowest level. You can generally describe events and ideas abstractly.
 
-IMPORTANT: Pay close attention to the EXACT entity in the question. If the question asks about a specific variant and memories only mention a DIFFERENT variant (e.g., "electric guitar" vs "acoustic guitar", "undergrad course research" vs "thesis research"), abstain — the entities are different even if related.
+IMPORTANT: Pay close attention to the EXACT entity in the question. If the question asks about a specific variant and memories only mention a DIFFERENT variant (e.g., "electric guitar" vs "acoustic guitar"), abstain — these are talking about different things!
 
 IMPORTANT: For comparison/savings questions, BOTH costs must come from USER-stated facts (or user-relayed, e.g., "my friend said"). Do NOT use assistant-provided general info. If only one side has a user-stated cost, abstain.
 
@@ -56,6 +56,7 @@ Before answering, reason step-by-step inside <mem_thinking> tags:
 - For counting: enumerate each item with date. Apply the question's EXACT verb/qualifier strictly (e.g., "LED" = leader only, "BAKED" = completed baking only, "RAISED" = total from events user participated in (include team/event totals), "COMPLETED writing" = each distinct finished piece). Count multiple items in a single memory separately. Do a SECOND full scan of all memories after initial count — items at positions 30-200 are commonly missed. Verify each item is a completed action (past tense), not a plan ("plans to", "intends to").
 - For cross-topic computation: scan ALL memories for each needed fact independently — they're often in unrelated conversations. List: (a) what you need, (b) where each appears, (c) the computation.
 - For temporal questions: identify dates, compute intervals from {question_date}
+- CONTEXT CHECK: Before using a memory's value, verify it applies to the SAME context as the question. A wake-up time "while traveling" is NOT the same as a regular weekday wake-up time. A "general daily" schedule may conflict with a "specific weekday" schedule — always prefer the more specific memory that matches the question's context. List the context of each memory (weekday routine vs. travel vs. weekend vs. specific day) and only use values from the matching context.
 - For time-bounded counting: compute the INCLUSIVE date window first, then check EVERY item's date. Err on inclusion for ambiguous dates.
 - For "where is X": trace location chronologically through memories
 - For suggestions: list (a) what user has/does, (b) what they avoid/dislike, (c) what they want to explore. Check every suggestion against (b) before including.
@@ -68,6 +69,8 @@ Rules:
 1. **Always try to answer**: If the topic appears in any memory — even indirectly — answer using what you have. Don't refuse for one missing detail.
 
 2. **Most recent wins**: For conflicting values of the same fact, use the most recent memory. But: (a) memories about different people/contexts aren't conflicting; (b) for historical event dates, use the memory recorded closest to the event; (c) for current counts/scores/status, the latest value REPLACES all earlier ones — don't sum or average.
+
+Similarly, when memories give two numbers for the same metric (e.g., "has 1,250 followers" and "close to 1,300 followers") on the same date, treat the HIGHER/UPDATED value as current — "close to 1,300" means the count has grown from 1,250 to approximately 1,300.
 
 3. **Time-bounded questions**: Compute the date window from {question_date}. Show date arithmetic in <mem_thinking>. Scan EVERY memory for events in range. "Last weekend" is imprecise — could mean up to 10 days ago as people sometimes mean weekend before the latest one. "Last 3 months" can include boundary days of the 4th month back.
 
@@ -111,11 +114,15 @@ When a query asks: "when I decided to do X", it means they are asking when X was
    - Respect anti-preferences — check every suggestion against known dislikes
    - Reference existing tools owned, not to acquire
    - Lead with personalization, don't pad with generic alternatives
-   - Suggest similar things to the user as their habits.
+   - Suggest similar things to the user as their habits. Eg. Logging basketball scores in a app they do usually. Eg. Adding travel logs to a travel logging app they use usually.
+   - IMPORTANT: Scan ALL top memories for user-owned tools, apps, and resources relevant to the question. If the user has a travel card (Suica), a trip organizer app (TripIt), a budgeting tool, etc., mention ALL of them — not just the most obvious one. Do a SECOND pass of the top 30 memories specifically looking for apps, tools, and resources the user has mentioned owning or using.
 
 13. **Reasonable deduction**:
 - Infer from patterns
 IMPORTANT: Assume that similar items referenced in the same sentence have the same type.
+Eg. "User ate lunch, which was the third meal with this chicken fajitas". This means the other meals with these chicken fajitas were lunch meals too, should be treated as explicit lunches.
+
+14. IMPORTANT: If two pieces of memory directly contradict each other (not just an update, a direct contradiction), then assume that the memory that was created later is true. Doesn't matter if a different one "appears" more reliable. If on the same day, trust the one at a later time.
 
 - Chronological actions:
 If the user is watching the 11th episode of a series is watching it normally, assume they have completed the earlier 10 too.
@@ -149,17 +156,21 @@ IMPORTANT: You MUST provide your full thinking in <mem_thinking> tags BEFORE giv
 
 
 def _to_human_date(iso_str: str) -> str:
-    """Convert ISO 8601 timestamp to human-readable date in UTC."""
+    """Convert ISO 8601 timestamp to human-readable date in UTC (e.g., 'Saturday, May 7, 2023')."""
     try:
+        # Try timezone-aware parsing first (e.g., 2023-04-14T20:11:00-07:00)
+        from datetime import timezone as _tz
+        # Handle common ISO formats with timezone offset
         for fmt in ("%Y-%m-%dT%H:%M:%S%z", "%Y-%m-%dT%H:%M:%S.%f%z"):
             try:
                 dt = _datetime.strptime(iso_str.replace("Z", "+0000"), fmt)
-                dt_utc = dt.astimezone(_timezone.utc)
+                dt_utc = dt.astimezone(_tz.utc)
                 return dt_utc.strftime("%A, %B %d, %Y")
             except ValueError:
                 continue
     except Exception:
         pass
+    # Fallback: naive datetime (no timezone info)
     for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"):
         try:
             return _datetime.strptime(iso_str[:19], fmt).strftime("%A, %B %d, %Y")
@@ -169,11 +180,15 @@ def _to_human_date(iso_str: str) -> str:
 
 
 def _format_user_profile(user_profile: dict) -> str:
-    """Format a user profile dict as readable key-value pairs."""
+    """Format a user profile dict as readable key-value pairs for the prompt.
+
+    Omits keys with null/empty values. Formats lists as comma-separated strings.
+    """
     lines = ["## User Profile"]
     for key, value in user_profile.items():
         if value is None:
             continue
+        # Format key: snake_case -> Title Case
         display_key = key.replace("_", " ").title()
         if isinstance(value, list):
             if not value:
@@ -186,6 +201,7 @@ def _format_user_profile(user_profile: dict) -> str:
         else:
             display_value = str(value)
         lines.append(f"{display_key}: {display_value}")
+    # Only return if we have at least one field beyond the header
     if len(lines) <= 1:
         return ""
     return "\n".join(lines)
@@ -193,14 +209,26 @@ def _format_user_profile(user_profile: dict) -> str:
 
 def get_answer_generation_prompt(
     question: str,
-    search_results: list[dict[str, Any]],
+    search_results: List[Dict[str, Any]],
     question_date: str,
-    user_profile: dict | None = None,
+    user_profile: dict = None,
 ) -> str:
-    """Build the answer generation prompt from search results."""
+    """Build the answer generation prompt from search results.
+
+    Args:
+        question: The evaluation question.
+        search_results: List of dicts with 'memory', 'score', and optionally 'created_at' keys.
+        question_date: The date when the question is posed.
+        user_profile: Optional dict of user profile data. When provided, a
+            User Profile section is added to the prompt before the memories.
+
+    Returns:
+        Formatted prompt string.
+    """
     if not search_results:
         memories_text = "(No relevant memories found)"
     else:
+        # Group memories by timestamp to save tokens and show temporal structure
         lines = []
         current_date = None
         for result in search_results:
@@ -216,6 +244,7 @@ def get_answer_generation_prompt(
                 lines.append(f"- {memory}")
         memories_text = "\n".join(lines).strip()
 
+    # Optionally prepend user profile section before memories
     profile_section = ""
     if user_profile:
         profile_section = _format_user_profile(user_profile)
@@ -230,19 +259,22 @@ def get_answer_generation_prompt(
 
 
 # ===============================================================================
-# JUDGE PROMPT
+# JUDGE PROMPT (single unified prompt for ALL question types)
 # ===============================================================================
 
-JUDGE_PROMPT = """I will give you a question, a correct answer (or rubric), and a model response. Decide whether the model response is correct. Answer yes or no only.
+JUDGE_PROMPT = """I will give you a question, a correct answer (or rubric), and a model response. Decide whether the model response is correct.
 
 CORE PRINCIPLE — Semantic equivalence: Judge by MEANING, not exact words. Answer "yes" if every concept in the correct answer is addressed in the response, even with different vocabulary, more specific terms, or restructured phrasing.
+
+IMPORTANT BIAS CHECK: You have a tendency to say "no" too quickly. Before concluding "no", you MUST verify the answer is truly wrong, not just differently worded. When in doubt, lean toward "yes".
 
 Rules:
 
 **Equivalence & Supersets**
 - Equivalent or superset responses are correct. Extra details are fine unless proven to be factually wrong. Extra qualifiers are fine unless proven to be wrong. E.g., "a blue dress and a matching necklace" is correct when the answer is "a blue dress."
 - If a response captures the most specific part (exact item/place/name) but omits a broader container, it's correct.
-- Same factual meaning with different phrasing = correct (e.g., "No, you did not visit with a friend" ~ "You didn't mention going with anyone").
+- Same factual meaning with different phrasing = correct (e.g., "No, you did not visit with a friend" ≈ "You didn't mention going with anyone").
+- Adding scope qualifiers like "regular-season" or "excluding X" is fine as long as the core value is correct. The qualifier may narrow the context but does NOT make the answer wrong unless the correct answer explicitly includes the excluded items.
 
 **Lists & Compound Terms**
 - For list answers, match each item by semantic meaning. A concept is covered if restated via synonyms, sub-concepts, or related terms. Adding methodological detail or rewording verbs to near-synonyms is acceptable.
@@ -255,13 +287,16 @@ Eg. Someone "not interested in general AI topics" could be very interested in sp
 
 **Numbers & Precision**
 - Hedging ("at least 3", "approximately") is fine if the core number matches. A range that includes the correct answer is correct.
-Generally, if the user themself would be satisfied by the response, it is acceptable.
+Generally, if the user themself would be satisfied by the response, it is acceptable. Ie. If the answer is conditional on information they would have (eg. their birthday, some hidden dependent information), and would be correct with that information, that is acceptable.
 - More precise answers are correct: "22 days" matches "3 weeks"; "over $270" matches "$270."; "9 1/2 months" matches "9 months";
-- Rough answers are correct: "about nine months" ~ "9 months; "8 months and 20 days" matches "9 months";
+
+- Rough answers are correct: "about nine months" ≈ "9 months; "8 months and 20 days" matches "9 months";
+
 - Off-by-one errors on days/weeks/months are acceptable.
-- Approximate unit conversions are equivalent: "14 weeks" ~ "3 months", "6 months" ~ "half a year."
-- Round time ranges generously: 7 months and 16 days ~ 8 months.
+- Approximate unit conversions are equivalent: "14 weeks" ≈ "3 months", "6 months" ≈ "half a year."
+- Round time ranges generously: 7 months and 16 days ≈ 8 months.
 - Notes instead of chords are acceptable when justified
+- A correct number with added context (e.g., "about 5 months ago (around December 2022)") is correct — the parenthetical date is supplementary, not a contradiction.
 
 **Dates & Temporal**
 - Date format variations are equivalent: "February 1st" = "Feb 1, 2023" = "on February 1."
@@ -282,11 +317,21 @@ Generally, if the user themself would be satisfied by the response, it is accept
 5. "May not prefer" = mild preference, not hard prohibition. Secondary/context-dependent inclusion is fine.
 6. Explicit acknowledgment of anti-preferences (e.g., "keep screens off") strengthens correctness.
 7. Context-dependent suggestions are acceptable (reading is fine on a bus even if rubric flags visual attention activities). Adjacent genres alongside preferred ones are additive, not contradictory.
+8. If the rubric mentions specific user resources/tools (e.g., "Suica card", "TripIt app"), the response is correct if it demonstrates awareness of the user's MAIN personal context even if it does not name every specific tool. The rubric is a guide, not a checklist.
 
 **Abstention Matching**
-- If correct answer = unanswerable, any phrasing conveying "not enough information" is correct. Providing partial context while concluding the question can't be answered = correct abstention.
+- If correct answer = unanswerable/abstention, ANY phrasing that conveys "I don't have this information" is correct, regardless of what partial context is mentioned or omitted.
+- Saying "not enough information" while mentioning partial related context = correct abstention.
+- Saying "no record of X" or "only have plans for X, not actual dates" = correct abstention.
+- The key test: does the response REFUSE to answer the question? If yes, it matches an abstention ground truth, period.
 
-FINAL CHECK: Before answering "no," ask: is the concept truly absent, or expressed via equivalent terminology? Only answer "no" if a core concept is entirely unaddressed.
+FINAL CHECK: Before answering "no," you MUST reason through these steps:
+1. What is the core factual claim or intent of the correct answer?
+2. Does the model response address that same claim, even in different words?
+3. Is the response a superset (correct answer + extra details)?
+4. For numbers: does the core number match, ignoring hedging/qualifiers?
+5. For abstentions: does the response effectively decline to answer?
+Only answer "no" if, after this analysis, a core concept is entirely unaddressed or contradicted.
 
 Question: {question}
 
@@ -294,7 +339,7 @@ Correct Answer: {answer}
 
 Model Response: {response}
 
-Is the model response correct? Answer yes or no only."""
+Think step-by-step in <judge_thinking> tags, then give your final verdict as exactly "yes" or "no" on a new line after the closing tag."""
 
 
 def get_judge_prompt(

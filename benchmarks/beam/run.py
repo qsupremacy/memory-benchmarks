@@ -727,6 +727,13 @@ async def process_question(
         sliced = formatted[:c]
         label = cutoff_label(c)
 
+        # Sort memories chronologically (oldest first) before answer generation
+        def _sort_key(m):
+            if isinstance(m, dict):
+                return m.get("created_at", "") or ""
+            return ""
+        sliced = sorted(sliced, key=_sort_key)
+
         # Generate answer
         gen_prompt = get_beam_answer_generation_prompt(question_text, sliced, top_k=c)
         generated_answer = await answerer.generate(system="", user=gen_prompt)
@@ -890,9 +897,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--project-name", required=True, help="Name for this eval run")
     parser.add_argument(
-        "--answerer-model", default="gpt-4o", help="Model for answer generation"
+        "--answerer-model", default="gpt-5", help="Model for answer generation"
     )
-    parser.add_argument("--judge-model", default="gpt-4o", help="Model for rubric judging")
+    parser.add_argument("--judge-model", default="gpt-5", help="Model for rubric judging")
     parser.add_argument(
         "--provider", default="openai", help="LLM provider (openai, anthropic, azure)"
     )

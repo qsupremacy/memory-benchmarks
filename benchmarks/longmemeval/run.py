@@ -89,10 +89,10 @@ load_dotenv()
 
 DATASET_URL = (
     "https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned/"
-    "resolve/main/longmemeval_oracle.json"
+    "resolve/main/longmemeval_s_cleaned.json"
 )
 DEFAULT_DATASET_DIR = "datasets/longmemeval"
-DEFAULT_DATASET_FILE = "longmemeval_oracle.json"
+DEFAULT_DATASET_FILE = "longmemeval_s_cleaned.json"
 CHUNK_SIZE = 2  # messages per ingestion chunk (user+assistant pair)
 
 
@@ -202,15 +202,15 @@ def get_retrieval_judge_prompt(
 
 
 def download_dataset(dataset_dir: str, logger: Any) -> str:
-    """Download longmemeval_oracle.json from HuggingFace if not present."""
+    """Download LongMemEval dataset from HuggingFace if not present."""
     path = os.path.join(dataset_dir, DEFAULT_DATASET_FILE)
     if os.path.exists(path):
         logger.info("Dataset already exists: %s", path)
         return path
 
     os.makedirs(dataset_dir, exist_ok=True)
-    logger.info("Downloading LongMemEval Oracle dataset...")
-    download_file(DATASET_URL, path, description="Downloading LongMemEval Oracle")
+    logger.info("Downloading LongMemEval dataset...")
+    download_file(DATASET_URL, path, description="Downloading LongMemEval")
 
     with open(path) as f:
         data = json.load(f)
@@ -797,11 +797,11 @@ def parse_args() -> argparse.Namespace:
         help="Name for this eval run",
     )
     parser.add_argument(
-        "--answerer-model", default="gpt-4o",
+        "--answerer-model", default="gpt-5",
         help="Model for answer generation",
     )
     parser.add_argument(
-        "--judge-model", default="gpt-4o",
+        "--judge-model", default="gpt-5",
         help="Model for judging",
     )
     parser.add_argument(
@@ -854,7 +854,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--dataset-path", default=None,
-        help="Path to local longmemeval_oracle.json",
+        help="Path to local longmemeval dataset JSON",
     )
     parser.add_argument(
         "--run-id", default=None,
@@ -1017,79 +1017,87 @@ async def async_main() -> None:
 
     async with mem0:
         with shutdown:
-            question_pbar = tqdm(
-                questions_to_process,
-                desc="Questions",
-                leave=True,
-            )
-            for question in question_pbar:
-                if shutdown.requested:
-                    break
+            results_lock = asyncio.Lock()
+            question_semaphore = asyncio.Semaphore(args.max_workers)
+            progress = {"done": 0, "total": len(questions_to_process)}
+            pbar = tqdm(total=progress["total"], desc="Questions", leave=True)
 
-                question_id = question["question_id"]
-                question_pbar.set_postfix_str(question_id)
+            async def process_single_question(question: dict):
+                async with question_semaphore:
+                    if shutdown.requested:
+                        return
 
-                # Skip if already done
-                if question_id in existing_ids:
-                    continue
+                    question_id = question["question_id"]
 
-                # --- Ingest ---
-                success, user_id, pairs = await ingest_question(
-                    question=question,
-                    mem0=mem0,
-                    logger=logger,
-                    run_id=run_id,
-                    output_dir=output_dir,
-                    shutdown=shutdown,
-                    debug=args.debug,
-                )
-                if not success:
-                    logger.error(
-                        "Ingestion failed for question %s", question_id,
-                    )
+                    async with results_lock:
+                        if question_id in existing_ids:
+                            progress["done"] += 1
+                            pbar.update(1)
+                            return
 
-                if shutdown.requested:
-                    break
-
-                # Fetch user profile if requested
-                user_profile = None
-                if args.user_profile:
-                    user_profile = await mem0.get_user_profile(user_id)
-
-                # --- Search + Answer/Judge ---
-                if args.mode == "retrieval":
-                    result = await process_question_retrieval(
+                    # --- Ingest ---
+                    success, user_id, pairs = await ingest_question(
                         question=question,
-                        user_id=user_id,
                         mem0=mem0,
-                        judge_llm=judge_llm,
-                        cutoffs=cutoffs,
-                        top_k=args.top_k,
-                        user_profile=user_profile,
-                        predict_only=args.predict_only,
                         logger=logger,
-                        score_debug=args.score_debug,
+                        run_id=run_id,
+                        output_dir=output_dir,
+                        shutdown=shutdown,
+                        debug=args.debug,
                     )
-                else:
-                    result = await process_question_answerer(
-                        question=question,
-                        user_id=user_id,
-                        mem0=mem0,
-                        answerer=answerer,
-                        judge_llm=judge_llm,
-                        cutoffs=cutoffs,
-                        top_k=args.top_k,
-                        user_profile=user_profile,
-                        predict_only=args.predict_only,
-                        logger=logger,
-                        score_debug=args.score_debug,
-                    )
+                    if not success:
+                        logger.error(
+                            "Ingestion failed for question %s", question_id,
+                        )
 
-                # Save per-question result
-                result_path = os.path.join(output_dir, f"{question_id}.json")
-                save_result_json(result_path, result)
-                all_evaluations.append(result)
-                existing_ids.add(question_id)
+                    if shutdown.requested:
+                        return
+
+                    # Fetch user profile if requested
+                    user_profile = None
+                    if args.user_profile:
+                        user_profile = await mem0.get_user_profile(user_id)
+
+                    # --- Search + Answer/Judge ---
+                    if args.mode == "retrieval":
+                        result = await process_question_retrieval(
+                            question=question,
+                            user_id=user_id,
+                            mem0=mem0,
+                            judge_llm=judge_llm,
+                            cutoffs=cutoffs,
+                            top_k=args.top_k,
+                            user_profile=user_profile,
+                            predict_only=args.predict_only,
+                            logger=logger,
+                            score_debug=args.score_debug,
+                        )
+                    else:
+                        result = await process_question_answerer(
+                            question=question,
+                            user_id=user_id,
+                            mem0=mem0,
+                            answerer=answerer,
+                            judge_llm=judge_llm,
+                            cutoffs=cutoffs,
+                            top_k=args.top_k,
+                            user_profile=user_profile,
+                            predict_only=args.predict_only,
+                            logger=logger,
+                            score_debug=args.score_debug,
+                        )
+
+                    # Save per-question result
+                    result_path = os.path.join(output_dir, f"{question_id}.json")
+                    save_result_json(result_path, result)
+                    async with results_lock:
+                        all_evaluations.append(result)
+                        existing_ids.add(question_id)
+                    pbar.update(1)
+
+            tasks = [process_single_question(q) for q in questions_to_process]
+            await asyncio.gather(*tasks)
+            pbar.close()
 
     # --- Metrics ---
     if not args.predict_only and all_evaluations:

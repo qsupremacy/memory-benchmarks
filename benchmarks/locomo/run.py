@@ -462,7 +462,7 @@ async def process_question(
         label = cutoff_label(c)
 
         # Generate answer
-        gen_prompt = get_answer_generation_prompt(question, sliced, user_profile=user_profile)
+        gen_prompt = get_answer_generation_prompt(question, sliced, reference_date=reference_date_human, user_profile=user_profile)
         generated_answer = await answerer.generate(system="", user=gen_prompt)
         if "ANSWER:" in generated_answer:
             generated_answer = generated_answer.rsplit("ANSWER:", 1)[-1].strip()
@@ -563,8 +563,8 @@ def parse_args() -> argparse.Namespace:
         description="Run LOCOMO-10 benchmark: ingest + search + answer + judge",
     )
     parser.add_argument("--project-name", required=True, help="Name for this eval run")
-    parser.add_argument("--answerer-model", default="gpt-4o", help="Model for answer generation")
-    parser.add_argument("--judge-model", default="gpt-4o", help="Model for judging")
+    parser.add_argument("--answerer-model", default="gpt-5", help="Model for answer generation")
+    parser.add_argument("--judge-model", default="gpt-5", help="Model for judging")
     parser.add_argument("--provider", default="openai", help="LLM provider (openai, anthropic, azure)")
     parser.add_argument("--judge-provider", default=None, help="Judge provider (defaults to --provider)")
     parser.add_argument("--conversations", default="0,1,2,3,4,5,6,7,8,9", help="Comma-separated conversation indices")
@@ -672,84 +672,93 @@ async def async_main() -> None:
         return
 
     existing_ids = {e["question_id"] for e in all_evaluations}
+    results_lock = asyncio.Lock()
+    conv_semaphore = asyncio.Semaphore(args.max_workers)
 
-    async with mem0:
-        with shutdown:
-            for conv_idx in conv_indices:
+    async def process_conversation(conv_idx: int):
+        """Process a single conversation: ingest → answer questions."""
+        async with conv_semaphore:
+            if shutdown.requested:
+                return
+            if conv_idx >= len(dataset):
+                logger.warning("Conversation %d out of range (dataset has %d)", conv_idx, len(dataset))
+                return
+
+            entry = dataset[conv_idx]
+            conversation = entry["conversation"]
+
+            # --- Ingest ---
+            success, user_id, chunks = await ingest_conversation(
+                conv_idx, entry, mem0, logger, run_id, args.project_name,
+                output_dir, shutdown, debug=args.debug,
+            )
+            if not success:
+                logger.error("Ingestion failed for conversation %d", conv_idx)
+
+            if shutdown.requested:
+                return
+
+            # Fetch user profile if requested
+            user_profile = None
+            if args.user_profile:
+                user_profile = await mem0.get_user_profile(user_id)
+
+            # Get reference date from first session
+            sorted_sessions = get_sorted_sessions(conversation)
+            ref_date_human = None
+            if sorted_sessions:
+                ref_date_human = sorted_sessions[-1][1]
+
+            # --- Process questions ---
+            questions = entry.get("qa", entry.get("qa_pairs", []))
+            conv_questions = [
+                (qi, qa) for qi, qa in enumerate(questions)
+                if qa.get("category") in categories
+            ]
+            if args.max_questions is not None:
+                conv_questions = conv_questions[:args.max_questions]
+
+            search_pbar = tqdm(conv_questions, desc=f"Questions conv {conv_idx}", leave=True)
+            for qi, qa in search_pbar:
+                qid = f"conv{conv_idx}_q{qi}"
+
                 if shutdown.requested:
                     break
-                if conv_idx >= len(dataset):
-                    logger.warning("Conversation %d out of range (dataset has %d)", conv_idx, len(dataset))
-                    continue
 
-                entry = dataset[conv_idx]
-                conversation = entry["conversation"]
-
-                # --- Ingest ---
-                success, user_id, chunks = await ingest_conversation(
-                    conv_idx, entry, mem0, logger, run_id, args.project_name,
-                    output_dir, shutdown, debug=args.debug,
-                )
-                if not success:
-                    logger.error("Ingestion failed for conversation %d", conv_idx)
-
-                if shutdown.requested:
-                    break
-
-                # Fetch user profile if requested
-                user_profile = None
-                if args.user_profile:
-                    user_profile = await mem0.get_user_profile(user_id)
-
-                # Get reference date from first session
-                sorted_sessions = get_sorted_sessions(conversation)
-                ref_date_human = None
-                if sorted_sessions:
-                    ref_date_human = sorted_sessions[0][1]
-
-                # --- Process questions ---
-                questions = entry.get("qa_pairs", [])
-                conv_questions = [
-                    (qi, qa) for qi, qa in enumerate(questions)
-                    if qa.get("category") in categories
-                ]
-                if args.max_questions is not None:
-                    conv_questions = conv_questions[:args.max_questions]
-
-                search_pbar = tqdm(conv_questions, desc=f"Questions conv {conv_idx}", leave=True)
-                for qi, qa in search_pbar:
-                    qid = f"conv{conv_idx}_q{qi}"
-
-                    if shutdown.requested:
-                        break
-
-                    # Skip if already done
+                # Skip if already done
+                async with results_lock:
                     if qid in existing_ids:
                         continue
 
-                    result = await process_question(
-                        qa=qa,
-                        qa_idx=qi,
-                        conv_idx=conv_idx,
-                        user_id=user_id,
-                        mem0=mem0,
-                        answerer=answerer,
-                        judge_llm=judge_llm,
-                        cutoffs=cutoffs,
-                        top_k=args.top_k,
-                        reference_date_human=ref_date_human,
-                        user_profile=user_profile,
-                        evidence_lookup=evidence_lookup,
-                        predict_only=args.predict_only,
-                        logger=logger,
-                        score_debug=args.score_debug,
-                    )
+                result = await process_question(
+                    qa=qa,
+                    qa_idx=qi,
+                    conv_idx=conv_idx,
+                    user_id=user_id,
+                    mem0=mem0,
+                    answerer=answerer,
+                    judge_llm=judge_llm,
+                    cutoffs=cutoffs,
+                    top_k=args.top_k,
+                    reference_date_human=ref_date_human,
+                    user_profile=user_profile,
+                    evidence_lookup=evidence_lookup,
+                    predict_only=args.predict_only,
+                    logger=logger,
+                    score_debug=args.score_debug,
+                )
 
-                    # Save per-question result
-                    result_path = os.path.join(output_dir, f"{qid}.json")
-                    save_result_json(result_path, result)
+                # Save per-question result
+                result_path = os.path.join(output_dir, f"{qid}.json")
+                save_result_json(result_path, result)
+                async with results_lock:
                     all_evaluations.append(result)
                     existing_ids.add(qid)
+
+    async with mem0:
+        with shutdown:
+            tasks = [process_conversation(idx) for idx in conv_indices]
+            await asyncio.gather(*tasks)
 
     # --- Metrics ---
     if not args.predict_only and all_evaluations:
