@@ -1,3 +1,6 @@
+--index-url https://mirrors.aliyun.com/pypi/simple/
+--trusted-host mirrors.aliyun.com
+
 aiohttp>=3.9.0
 aiolimiter>=1.1.0
 anthropic>=0.40.0
