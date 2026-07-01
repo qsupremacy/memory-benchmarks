@@ -105,6 +105,11 @@ class LLMClient:
         return text.lower().startswith("yes")
     def _init_openai(self, api_key: str | None, base_url: str | None, timeout: float, **kwargs: Any) -> None:
         import openai
+        # Fall back to OPENAI_API_KEY / OPENAI_BASE_URL env vars so locomo can be
+        # pointed at OpenAI-compatible providers (DeepSeek, vLLM, etc.) without
+        # code changes — just export the env vars before running.
+        api_key = api_key or os.getenv("OPENAI_API_KEY")
+        base_url = base_url or os.getenv("OPENAI_BASE_URL")
         client_kwargs: dict[str, Any] = {
             "timeout": openai.Timeout(timeout, connect=10.0),
         }
