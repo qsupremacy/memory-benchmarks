@@ -1,0 +1,11 @@
+# Exclude build artifacts and Python caches from the build context
+# so docker build doesn't repeatedly ship them to the daemon.
+*.whl
+en_core_web_sm/
+__pycache__/
+*.pyc
+.git/
+.gitignore
+.dockerignore
+Dockerfile
+README*
