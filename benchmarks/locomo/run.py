@@ -45,6 +45,11 @@ from tqdm import tqdm
 from benchmarks.common.llm_client import LLMClient
 from benchmarks.common.mem0_client import Mem0Client, format_search_results
 from benchmarks.common.metrics import compute_overall_metrics
+from benchmarks.common.agentarts_memory import MemoryBackend
+if os.getenv("MEMORY_BACKEND", "mem0") == "agentarts":
+    from benchmarks.common.agentarts_memory import AgentArtsMemoryClient as _MemoryBackend
+else:
+    _MemoryBackend = Mem0Client  # type: ignore[assignment,misc]
 from benchmarks.common.schema import (
     CutoffResult,
     EvalItem,
@@ -238,7 +243,7 @@ def load_evidence_lookup(dataset_path: str) -> dict[tuple, str]:
 async def ingest_conversation(
     conv_idx: int,
     entry: dict,
-    mem0: Mem0Client,
+    mem0: MemoryBackend,
     logger: Any,
     run_id: str,
     project_name: str,
@@ -391,7 +396,7 @@ async def process_question(
     qa_idx: int,
     conv_idx: int,
     user_id: str,
-    mem0: Mem0Client,
+    mem0: MemoryBackend,
     answerer: LLMClient,
     judge_llm: LLMClient,
     cutoffs: list[int],
@@ -777,22 +782,27 @@ async def async_main() -> None:
         print(f"  Predict complete ({len(expected_items)} questions). Running judge phase (no Mem0)...")
 
         sem = asyncio.Semaphore(args.max_workers)
+        pbar = tqdm(total=len(expected_items), desc="Judge", initial=0)
 
         async def judge_one(qid: str, conv_idx: int, qi: int, qa: dict) -> None:
-            path = os.path.join(output_dir, f"{qid}.json")
-            data = json.loads(Path(path).read_text())
-            if data.get("cutoff_results") and not args.rejudge:
-                return
-            async with sem:
-                await apply_locomo_judge_to_saved_result(
-                    data, qa, conv_idx, answerer, judge_llm, cutoffs, evidence_lookup,
-                )
-                save_result_json(path, data)
+            try:
+                path = os.path.join(output_dir, f"{qid}.json")
+                data = json.loads(Path(path).read_text())
+                if data.get("cutoff_results") and not args.rejudge:
+                    return
+                async with sem:
+                    await apply_locomo_judge_to_saved_result(
+                        data, qa, conv_idx, answerer, judge_llm, cutoffs, evidence_lookup,
+                    )
+                    save_result_json(path, data)
+            finally:
+                pbar.update(1)
 
         await asyncio.gather(*[
             judge_one(qid, conv_idx, qi, qa)
             for qid, conv_idx, qi, qa in expected_items
         ])
+        pbar.close()
 
         all_evaluations = [
             json.loads(Path(os.path.join(output_dir, f"{qid}.json")).read_text())
@@ -829,12 +839,19 @@ async def async_main() -> None:
 
     # Init Mem0 (not used for --evaluate-only)
     backend = os.getenv("MEM0_BACKEND", args.backend)
-    mem0 = Mem0Client(
-        mode=backend,
-        host=args.mem0_host,
-        api_key=args.mem0_api_key if backend == "cloud" else None,
-        rpm=args.rpm,
-    )
+    if os.getenv("MEMORY_BACKEND", "mem0") == "agentarts":
+        mem0 = _MemoryBackend(
+            api_key=os.getenv("HUAWEICLOUD_SDK_MEMORY_API_KEY", ""),
+            space_id=os.getenv("AGENTARTS_MEMORY_SPACE_ID", ""),
+            region=os.getenv("AGENTARTS_REGION", "cn-southwest-2"),
+        )
+    else:
+        mem0 = _MemoryBackend(
+            mode=backend,
+            host=args.mem0_host,
+            api_key=args.mem0_api_key if backend == "cloud" else None,
+            rpm=args.rpm,
+        )
     shutdown = GracefulShutdown()
     checkpoint = Checkpoint(output_dir)
 
