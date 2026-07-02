@@ -209,13 +209,24 @@ class AwsAgentCoreMemoryClient:
         score_debug: bool = False,  # noqa: ARG002 — accepted for API parity
         **_unused: Any,
     ) -> list[dict[str, Any]]:
+        # AWS Bedrock AgentCore Memory caps topK at 100 (ValidationException
+        # otherwise). LOCOMO defaults to top_k=200; clamp and warn so the
+        # driver can still slice into its 10/20/50/200 cutoffs (200 will
+        # equal 100 — same limitation as the AgentArts backend).
+        effective_top_k = min(top_k, 100)
+        if top_k > 100:
+            logger.warning(
+                "AWS top_k=%d exceeds backend cap of 100; clamping to 100. "
+                "Cutoffs above 100 (e.g. 200) will see no extra results.",
+                top_k,
+            )
         session = await self._get_session(user_id)
 
         def _do_search() -> Any:
             return session.search_long_term_memories(
                 query=query,
                 namespace_path=self._namespace_path,
-                top_k=top_k,
+                top_k=effective_top_k,
             )
 
         try:
