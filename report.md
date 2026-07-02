@@ -4,6 +4,7 @@
 **运行 ID**: `9de5732b`
 **数据集**: LoCoMo10（10 个对话，5,882 chunks）
 **运行时间**: 约 1 小时 21 分钟
+**LLM 成本**: 23.48 元（1,540 题 ≈ 1.52 分/题，仅 DeepSeek 账单）
 
 ---
 
@@ -63,6 +64,32 @@
 | 中位速度（首末 5 个值均值） | ~17 s/it（前期）→ ~32 s/it（后期） |
 
 速度随时间下降（17 → 32 s/it）说明 DeepSeek 在长时运行下有排队/限流，**单次 LLM 调用偶发等待 30s+**，但每次都在 120s timeout 内完成，没有触发重试。
+
+---
+
+## 成本与 Token 消耗
+
+数据来自 `cost.json`（DeepSeek 账单 API，币种 CNY）。仅 2026-07-01 有数据，与本轮运行日期吻合。DeepSeek 后端把 `deepseek-chat` 计费归在 `deepseek-v4-flash` 类目下，`deepseek-v4-pro` 与 `deepseek-chat & deepseek-reasoner` 类目下用量为 0。
+
+### 总花费
+
+| 模型类目 | Cache Hit (¥) | Cache Miss (¥) | Response (¥) | **合计** |
+|---|---:|---:|---:|---:|
+| deepseek-v4-pro | 0 | 0 | 0 | **0** |
+| **deepseek-v4-flash** | 0.51 | 12.82 | 10.15 | **23.48** |
+| deepseek-chat & deepseek-reasoner | 0 | 0 | 0 | **0** |
+| **总计** | **0.51** | **12.82** | **10.15** | **23.48** |
+
+### 单题成本
+
+- **23.48 元 / 1,540 题 ≈ 0.0152 元/题**（约 1.5 分钱）
+- Cache 命中率：**0.51 / (0.51 + 12.82) ≈ 3.8 %**（冷启动，无 cache 复用）
+
+### 成本结构
+
+- **Input 占 56.8 %**（13.33 / 23.48）：cache miss 12.82 + cache hit 0.51
+- **Output 占 43.2 %**（10.15 / 23.48）：response
+- 实际 token 数量未在账单中提供，仅有金额。如需拆分 token 维度，需结合 DeepSeek 公布的单价反推。
 
 ---
 
