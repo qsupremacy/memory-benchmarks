@@ -46,6 +46,127 @@ _ConversationalMessage = None
 _MessageRole = None
 
 
+# ---------------------------------------------------------------------------
+# Record-shape extractors
+# ---------------------------------------------------------------------------
+# Bedrock AgentCore Memory's `search_long_term_memories` returns objects whose
+# actual payload is wrapped in a `_data` dict (Pydantic v2 raw-shape style).
+# We try several known paths so the client tolerates both raw dicts and SDK
+# objects, and so schema changes in a future SDK version don't break us.
+
+
+def _as_dict(rec: Any) -> list[dict[str, Any]]:
+    """Return all dict-shaped views of `rec` we can extract."""
+    out: list[dict[str, Any]] = []
+    if isinstance(rec, dict):
+        out.append(rec)
+    else:
+        try:
+            d = rec.__dict__ or {}
+            if isinstance(d, dict):
+                out.append(d)
+        except Exception:  # noqa: BLE001
+            pass
+        for attr in ("_data", "data"):
+            try:
+                inner = getattr(rec, attr, None)
+            except Exception:  # noqa: BLE001
+                inner = None
+            if isinstance(inner, dict):
+                out.append(inner)
+    # Always include the original as a final fallback (non-dict, handled in _extract_text).
+    return out
+
+
+def _extract_text_from_record(rec: Any) -> str:
+    """Pull the human-readable text out of a Bedrock memory record.
+
+    Walks several known shapes:
+      - dict (raw API response)
+      - object with `_data` / `data` attribute holding a dict
+      - object with direct `content` / `memory` / `text` attributes
+    """
+    if rec is None:
+        return ""
+    for d in _as_dict(rec):
+        # Common nested shapes
+        for path in (
+            ("content", "text"),
+            ("_data", "content", "text"),
+            ("data", "content", "text"),
+        ):
+            cur: Any = d
+            ok = True
+            for k in path:
+                if not isinstance(cur, dict) or k not in cur:
+                    ok = False
+                    break
+                cur = cur[k]
+            if ok and isinstance(cur, str) and cur.strip():
+                return cur
+        # Direct string fields
+        for key in ("text", "memory", "content"):
+            v = d.get(key)
+            if isinstance(v, str) and v.strip():
+                return v
+            if isinstance(v, dict):
+                t = v.get("text")
+                if isinstance(t, str) and t.strip():
+                    return t
+    # Last resort: stringify
+    return str(rec)
+
+
+def _extract_id_from_record(rec: Any) -> str | None:
+    for d in _as_dict(rec):
+        for path in (
+            ("id",),
+            ("memoryRecordId",),
+            ("_data", "memoryRecordId"),
+            ("data", "memoryRecordId"),
+            ("_data", "id"),
+        ):
+            cur: Any = d
+            ok = True
+            for k in path:
+                if not isinstance(cur, dict) or k not in cur:
+                    ok = False
+                    break
+                cur = cur[k]
+            if ok and isinstance(cur, str) and cur:
+                return cur
+    return None
+
+
+def _extract_created_at_from_record(rec: Any) -> str | None:
+    for d in _as_dict(rec):
+        for path in (
+            ("created_at",),
+            ("createdAt",),
+            ("_data", "createdAt"),
+            ("data", "createdAt"),
+            ("_data", "created_at"),
+        ):
+            cur: Any = d
+            ok = True
+            for k in path:
+                if not isinstance(cur, dict) or k not in cur:
+                    ok = False
+                    break
+                cur = cur[k]
+            if ok and isinstance(cur, (str, int, float)):
+                return str(cur)
+    return None
+
+
+def _extract_score_from_record(rec: Any, default: float) -> Any:
+    for d in _as_dict(rec):
+        v = d.get("score") or d.get("relevanceScore") or d.get("relevance")
+        if v is not None:
+            return v
+    return default
+
+
 class AwsAgentCoreMemoryClient:
     """Async wrapper around the synchronous AWS Bedrock AgentCore Memory SDK."""
 
@@ -237,28 +358,24 @@ class AwsAgentCoreMemoryClient:
 
         translated: list[dict[str, Any]] = []
         for i, rec in enumerate(records or []):
-            if not isinstance(rec, dict):
-                rec = rec.__dict__ if hasattr(rec, "__dict__") else {}
-            text = (
-                rec.get("content")
-                or rec.get("memory")
-                or rec.get("text")
-                or str(rec)
-            )
+            text = _extract_text_from_record(rec)
+            rec_id = _extract_id_from_record(rec) or f"aws-{user_id}-{i}"
+            created_at = _extract_created_at_from_record(rec)
             # NOTE: AWS does not expose a relevance score. Synthesize a
             # descending-rank proxy so search-results objects stay well-formed.
             synthetic = 1.0 - i * 0.01
             try:
-                score = float(rec.get("score", synthetic))
+                score = float(_extract_score_from_record(rec, synthetic))
             except (TypeError, ValueError):
                 score = synthetic
-            translated.append(
-                {
-                    "memory": str(text),
-                    "score": score,
-                    "id": rec.get("id") or f"aws-{user_id}-{i}",
-                }
-            )
+            entry: dict[str, Any] = {
+                "memory": str(text),
+                "score": score,
+                "id": rec_id,
+            }
+            if created_at:
+                entry["created_at"] = created_at
+            translated.append(entry)
 
         translated.sort(key=lambda r: r["score"], reverse=True)
         return translated
