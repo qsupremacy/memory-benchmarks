@@ -63,6 +63,7 @@ class Mem0Client:
         timeout: float = 300.0,
         event_poll_interval: float = 0.5,
         event_poll_timeout: float = 300.0,
+        api_version: int = 3,
     ):
         self.mode = mode
 
@@ -81,7 +82,16 @@ class Mem0Client:
         self.event_poll_timeout = event_poll_timeout
         self.timeout = aiohttp.ClientTimeout(total=timeout)
         self.limiter = AsyncLimiter(100000, 60)  # no client-side rate limiting
+        self.api_version = api_version
         self._session: aiohttp.ClientSession | None = None
+
+        if mode == "cloud":
+            logger.info(
+                "Mem0Client[cloud] host=%s api_version=v%d add_url=%s search_url=%s",
+                self.host, self.api_version,
+                f"{self.host}/v{self.api_version}/memories/",
+                f"{self.host}/v{self.api_version}/memories/search/",
+            )
 
     @property
     def _headers(self) -> dict[str, str]:
@@ -205,11 +215,16 @@ class Mem0Client:
         for attempt in range(self.max_retries):
             try:
                 async with self.limiter:
-                    async with session.post(f"{self.host}/v3/memories/", json=payload) as resp:
+                    async with session.post(f"{self.host}/v{self.api_version}/memories/", json=payload) as resp:
                         resp.raise_for_status()
                         resp_data = await resp.json()
 
                 event_id = resp_data.get("event_id")
+                if not event_id:
+                    # Volcengine wraps event_id inside results[0] instead of returning it at top level
+                    results_list = resp_data.get("results") or []
+                    if results_list and isinstance(results_list[0], dict):
+                        event_id = results_list[0].get("event_id")
                 if not event_id:
                     logger.warning("V3 add returned no event_id: %s", resp_data)
                     if attempt < self.max_retries - 1:
@@ -327,7 +342,7 @@ class Mem0Client:
         for attempt in range(self.max_retries):
             try:
                 async with self.limiter:
-                    async with session.post(f"{self.host}/v3/memories/search/", json=payload) as resp:
+                    async with session.post(f"{self.host}/v{self.api_version}/memories/search/", json=payload) as resp:
                         resp.raise_for_status()
                         resp_data = await resp.json()
 
