@@ -1021,12 +1021,21 @@ async def async_main() -> None:
 
     # Init clients
     backend = os.getenv("MEM0_BACKEND", args.backend)
-    mem0 = Mem0Client(
-        mode=backend,
-        host=args.mem0_host,
-        api_key=args.mem0_api_key if backend == "cloud" else None,
-        rpm=args.rpm,
-    )
+    backend_choice = os.getenv("MEMORY_BACKEND", "mem0")
+    if backend_choice == "aws":
+        from benchmarks.common.aws_memory import AwsAgentCoreMemoryClient
+        mem0 = AwsAgentCoreMemoryClient(
+            memory_id=os.getenv("AWS_MEMORY_ID"),
+            region_name=os.getenv("AWS_REGION"),
+            session_id=os.getenv("AWS_MEMORY_SESSION_ID", "memory-bench-session"),
+        )
+    else:
+        mem0 = Mem0Client(
+            mode=backend,
+            host=args.mem0_host,
+            api_key=args.mem0_api_key if backend == "cloud" else None,
+            rpm=args.rpm,
+        )
     answerer = LLMClient(
         model=args.answerer_model, provider=args.provider, rpm=args.rpm
     )

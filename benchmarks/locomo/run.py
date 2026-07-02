@@ -46,8 +46,11 @@ from benchmarks.common.llm_client import LLMClient
 from benchmarks.common.mem0_client import Mem0Client, format_search_results
 from benchmarks.common.metrics import compute_overall_metrics
 from benchmarks.common.agentarts_memory import MemoryBackend
-if os.getenv("MEMORY_BACKEND", "mem0") == "agentarts":
+_backend_choice = os.getenv("MEMORY_BACKEND", "mem0")
+if _backend_choice == "agentarts":
     from benchmarks.common.agentarts_memory import AgentArtsMemoryClient as _MemoryBackend
+elif _backend_choice == "aws":
+    from benchmarks.common.aws_memory import AwsAgentCoreMemoryClient as _MemoryBackend
 else:
     _MemoryBackend = Mem0Client  # type: ignore[assignment,misc]
 from benchmarks.common.schema import (
@@ -842,11 +845,17 @@ async def async_main() -> None:
     # Init Mem0 (not used for --evaluate-only)
     # CLI takes precedence over MEM0_BACKEND env var; env var is fallback only.
     backend = args.backend or os.getenv("MEM0_BACKEND", "oss")
-    if os.getenv("MEMORY_BACKEND", "mem0") == "agentarts":
+    if _backend_choice == "agentarts":
         mem0 = _MemoryBackend(
             api_key=os.getenv("HUAWEICLOUD_SDK_MEMORY_API_KEY", ""),
             space_id=os.getenv("AGENTARTS_MEMORY_SPACE_ID", ""),
             region=os.getenv("AGENTARTS_REGION", "cn-southwest-2"),
+        )
+    elif _backend_choice == "aws":
+        mem0 = _MemoryBackend(
+            memory_id=os.getenv("AWS_MEMORY_ID"),
+            region_name=os.getenv("AWS_REGION"),
+            session_id=os.getenv("AWS_MEMORY_SESSION_ID", "memory-bench-session"),
         )
     else:
         mem0 = _MemoryBackend(

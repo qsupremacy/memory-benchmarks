@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any, Protocol
+from typing import Any
 
 from agentarts.sdk.memory import AsyncMemoryClient
 from agentarts.sdk.memory.inner.config import (
@@ -24,18 +24,9 @@ from agentarts.sdk.memory.inner.config import (
     TextMessage,
 )
 
+from benchmarks.common.memory_backend import MemoryBackend  # noqa: F401  (re-export)
+
 logger = logging.getLogger(__name__)
-
-
-class MemoryBackend(Protocol):
-    """Duck-typed surface used by benchmarks. Both Mem0Client and AgentArtsMemoryClient satisfy this."""
-
-    async def add(self, messages: list[dict[str, Any]], user_id: str, timestamp: int | None = ...) -> dict[str, Any] | None: ...
-    async def search(self, query: str, user_id: str, top_k: int = ..., score_debug: bool = ...) -> list[dict[str, Any]]: ...
-    async def get_user_profile(self, user_id: str) -> dict[str, Any]: ...
-    async def close(self) -> None: ...
-    async def __aenter__(self) -> "MemoryBackend": ...
-    async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None: ...
 
 
 class AgentArtsMemoryClient:
